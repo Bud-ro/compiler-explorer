@@ -103,6 +103,14 @@ export class InstructionSets {
                 target: ['rv32', 'riscv32'],
                 path: ['/riscv32-'],
             },
+            rx: {
+                // Renesas RX. Match the full target triple (Renesas/GNU use
+                // rx-elf, CE's own cross builds use rx-unknown-elf) rather than a
+                // bare "rx" substring, which would over-match; the binary paths
+                // are rx-elf-* / rx-unknown-elf-*.
+                target: ['rx-elf', 'rx-unknown-elf'],
+                path: ['/rx-elf-', '/rx-unknown-elf-'],
+            },
             sh: {
                 target: ['sh'],
                 path: ['/sh-'],

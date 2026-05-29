@@ -123,6 +123,18 @@ const TEST_MATRIX: Record<PropertyKey, [string, string, string, string][]> = {
             'https://www.pagetable.com/c64ref/6502/?cpu=65c816',
         ],
     ],
+    rx: [
+        ['mov', 'Transferring data [RXv1]', 'This instruction transfers src to dest', 'renesas.com'],
+        ['fadd', 'Floating-point addition [RXv1]', 'single-precision floating-point', 'renesas.com'],
+        ['add', 'Addition without carry [RXv1]', 'Flags affected:', 'rev120#page=53'],
+        ['emaca', 'Extended multiply-accumulate', 'multiplies src by src2', 'rxv2'],
+        [
+            'dadd',
+            'Double-precision floating-point addition without carry [RXv3]',
+            'double-precision floating-point',
+            'rxv3',
+        ],
+    ],
 };
 
 describe('Assembly Documentation API', () => {

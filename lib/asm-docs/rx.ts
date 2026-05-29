@@ -1,4 +1,4 @@
-// Copyright (c) 2023, Compiler Explorer Authors
+// Copyright (c) 2026, Compiler Explorer Authors
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -22,52 +22,15 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-export const InstructionSetsList = [
-    '6502',
-    'aarch64',
-    'amd64',
-    'x86',
-    'arm32',
-    'avr',
-    'beam',
-    'c6x',
-    'dex',
-    'ebpf',
-    'evm',
-    'eravm',
-    'ez80',
-    'hook',
-    'hppa',
-    'core',
-    'java',
-    'kvx',
-    'llvm',
-    'loongarch',
-    'm68k',
-    'mips',
-    'mos6502',
-    'mpy',
-    'mrisc32',
-    'msp430',
-    'perl',
-    'powerpc',
-    'ptx',
-    'python',
-    'riscv32',
-    'riscv64',
-    'rx',
-    's390x',
-    'sass',
-    'sh',
-    'sparc',
-    'spirv',
-    'vax',
-    'wasm32',
-    'wasm64',
-    'wdc65c816',
-    'xtensa',
-    'z180',
-    'z80',
-] as const;
+import type {AssemblyInstructionInfo} from '../../types/assembly-docs.interfaces.js';
+import {BaseAssemblyDocumentationProvider} from './base.js';
+import {getAsmOpcode} from './generated/asm-docs-rx.js';
 
-export type InstructionSet = (typeof InstructionSetsList)[number];
+export class RxDocumentationProvider extends BaseAssemblyDocumentationProvider {
+    public static get key() {
+        return 'rx';
+    }
+    public override getInstructionInformation(instruction: string): AssemblyInstructionInfo | null {
+        return getAsmOpcode(instruction) || null;
+    }
+}
