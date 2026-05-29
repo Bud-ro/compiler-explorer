@@ -34,5 +34,6 @@ export {PowerDocumentationProvider} from './power.js';
 export {PTXDocumentationProvider} from './ptx.js';
 export {PythonDocumentationProvider} from './python.js';
 export {Riscv64DocumentationProvider} from './riscv64.js';
+export {RxDocumentationProvider} from './rx.js';
 export {SASSDocumentationProvider} from './sass.js';
 export {WDC65c816DocumentationProvider} from './wdc65c816.js';

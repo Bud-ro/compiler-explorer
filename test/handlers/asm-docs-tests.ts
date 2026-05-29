@@ -123,6 +123,12 @@ const TEST_MATRIX: Record<PropertyKey, [string, string, string, string][]> = {
             'https://www.pagetable.com/c64ref/6502/?cpu=65c816',
         ],
     ],
+    rx: [
+        ['mov', 'Transferring data [RXv1]', 'Transferring data', 'renesas.com'],
+        ['fadd', 'Floating-point addition [RXv1]', 'Floating-point addition', 'renesas.com'],
+        ['emaca', 'Extended multiply-accumulate', 'RXv2', 'rxv2'],
+        ['dadd', 'Double-precision floating-point addition without carry [RXv3]', 'RXv3', 'rxv3'],
+    ],
 };
 
 describe('Assembly Documentation API', () => {

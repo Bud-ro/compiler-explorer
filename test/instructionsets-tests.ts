@@ -57,4 +57,27 @@ describe('InstructionSets', () => {
 
         expect(isets.getCompilerInstructionSetHint('hppa-unknown-linux-gnu')).toBe('hppa');
     });
+
+    it('should recognize rx from compiler target string', () => {
+        const isets = new InstructionSets();
+
+        expect(isets.getCompilerInstructionSetHint('rx-elf')).toBe('rx');
+    });
+
+    it('should recognize rx from upstream rx-elf-gcc filepath', () => {
+        const isets = new InstructionSets();
+
+        expect(isets.getCompilerInstructionSetHint(false, '/usr/local/rx-elf/bin/rx-elf-gcc')).toBe('rx');
+    });
+
+    it('should recognize rx from CE rx-unknown-elf cross build filepath', () => {
+        const isets = new InstructionSets();
+
+        expect(
+            isets.getCompilerInstructionSetHint(
+                false,
+                '/opt/compiler-explorer/rx/gcc-16.1.0/rx-unknown-elf/bin/rx-unknown-elf-gcc',
+            ),
+        ).toBe('rx');
+    });
 });
