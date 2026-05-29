@@ -104,10 +104,11 @@ export class InstructionSets {
                 path: ['/riscv32-'],
             },
             rx: {
-                // Renesas RX. GCC reports the target triple as "rx-elf"; the
-                // upstream Renesas/GNU binaries are named rx-elf-*, while CE's
-                // own cross builds use the rx-unknown-elf- prefix.
-                target: ['rx'],
+                // Renesas RX. Match the full target triple (Renesas/GNU use
+                // rx-elf, CE's own cross builds use rx-unknown-elf) rather than a
+                // bare "rx" substring, which would over-match; the binary paths
+                // are rx-elf-* / rx-unknown-elf-*.
+                target: ['rx-elf', 'rx-unknown-elf'],
                 path: ['/rx-elf-', '/rx-unknown-elf-'],
             },
             sh: {
