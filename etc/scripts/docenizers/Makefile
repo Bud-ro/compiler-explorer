@@ -17,6 +17,7 @@ all: $(UV_DEPS) \
  $(GEN_DIR)/asm-docs-java.ts \
  $(GEN_DIR)/asm-docs-llvm.ts \
  $(GEN_DIR)/asm-docs-riscv64.ts \
+ $(GEN_DIR)/asm-docs-rx.ts \
  $(GEN_DIR)/asm-docs-ptx.ts \
  $(GEN_DIR)/asm-docs-sass.ts \
  $(GEN_DIR)/asm-docs-python.ts \
@@ -62,6 +63,8 @@ $(GEN_DIR)/asm-docs-sass.ts: docenizer-ptx-sass.py $(UV_DEPS)
 $(GEN_DIR)/asm-docs-python.ts: docenizer-python.py $(UV_DEPS)
 	$(UV_BIN) run python3 $< -o $@
 $(GEN_DIR)/asm-docs-riscv64.ts: docenizer-riscv64.py $(UV_DEPS)
+	$(UV_BIN) run python3 $< -o $@
+$(GEN_DIR)/asm-docs-rx.ts: docenizer-rx.py $(UV_DEPS)
 	$(UV_BIN) run python3 $< -o $@
 $(GEN_DIR)/asm-docs-perl.ts: docenizer-perl.py $(UV_DEPS)
 	$(UV_BIN) run python3 $< -o $@

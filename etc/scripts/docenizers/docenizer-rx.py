@@ -29,13 +29,12 @@ extracts the Syntax, the Function description prose, and the Flag Change table
 deep-linking to the detail page (``...#page=N``).
 
 Usage:
-    ./docenizer-rx.py --pdf-dir DIR     # parse rxv1.pdf/rxv2.pdf/rxv3.pdf in DIR
-    ./docenizer-rx.py                   # download the manuals, then parse
+    ./docenizer-rx.py                   # download the manuals (default) and parse
+    ./docenizer-rx.py --pdf-dir DIR     # parse local rxv1.pdf/rxv2.pdf/rxv3.pdf
 
-The PDFs are the latest revisions published at
-https://llvm-gcc-renesas.com / https://www.renesas.com (see MANUALS). Renesas'
-site sometimes 403s automated fetches, so ``--pdf-dir`` lets you point at
-locally downloaded copies; when parsing yields no detail for an instruction the
+By default the manuals (latest revisions, see MANUALS) are downloaded from
+renesas.com, like docenizer-avr.py; ``--pdf-dir`` is an offline override pointing
+at pre-downloaded copies. When parsing yields no detail for an instruction the
 generator falls back to the index name so output is always complete.
 """
 import argparse
@@ -294,15 +293,22 @@ def load_manual_pages(isa, pdf_dir):
 FLAG_NAMES = {"C", "Z", "S", "O",
               "DCV", "DCO", "DCZ", "DCU", "DCX", "DCE",
               "DFV", "DFO", "DFZ", "DFU", "DFX"}
-MARKS = {"√", "−", "-", "–"}  # check, minus, hyphen, en-dash
-CHANGED = "√"
-# Page furniture that pdfminer interleaves into the section text.
+# "Changed" marks: U+221A check (RXv1/v2), U+F050 private-use check (RXv3
+# DFPU pages), and "*" (conditional change, e.g. CLRPSW/MVTC). "Unchanged" is
+# the minus/hyphen/en-dash.
+CHANGED_MARKS = {"\u221a", "\uf050", "*"}  # check, RXv3 DFPU check, conditional
+UNCHANGED_MARKS = {"\u2212", "-", "\u2013"}  # minus, hyphen, en-dash
+MARKS = CHANGED_MARKS | UNCHANGED_MARKS
+# Page furniture that pdfminer interleaves into the section text (incl. a bare
+# mnemonic/figure-label line such as "BFMOV" or "MSB").
 _NOISE = re.compile(
     r"^(Section\s+\d+|Instruction Code|Page:\s*\d+|RX Family|R01US\d|.*Rev\.\d+$|"
-    r"Page \d+ of \d+|[A-Za-z/\- ]*\binstruction$)"
+    r"Page \d+ of \d+|[A-Za-z/\- ]*\binstruction$|[A-Z][A-Z0-9]{1,9}$)"
 )
-# A real Syntax line starts with the (optionally numbered) mnemonic token.
-_SYNLINE = re.compile(r"^(\(\d+\)\s*)?[A-Z][A-Z0-9_]{1,9}(\.[A-Za-z]+)?[ (\t]")
+# A real Syntax line starts with a mnemonic: 2+ caps, optionally a short
+# lowercase tail (BCnd, DCMPcm, SCCnd) and a .size suffix. This rejects the
+# Title-case English "name"/expansion lines that also sit under Syntax.
+_SYNLINE = re.compile(r"^(\(\d+\)\s*)?[A-Z]{2,}[a-z]{0,2}(\.[A-Za-z]+)?[ (\t]")
 # Tokens that mark the start of an operand/encoding table (not prose).
 _TABLE_TOK = re.compile(r"\b(b\d{1,2}|Operand|Processing|Code Size|memex|UIMM|SIMM|dsp:|Rs2?|Rd|Adest)\b")
 
@@ -311,7 +317,8 @@ def _ascii(text):
     """Normalize a few unicode symbols and drop any remaining non-ASCII."""
     text = (text.replace("–", "-").replace("—", "-").replace("−", "-")
                 .replace("×", "x").replace("√", "").replace("•", " ")
-                .replace("·", " "))
+                .replace("·", " ").replace("≤", "<=").replace("≥", ">=")
+                .replace("≠", "!=").replace("∞", "infinity"))
     return text.encode("ascii", "ignore").decode("ascii")
 
 
@@ -331,8 +338,8 @@ def _section_index(lines, name):
     return -1
 
 
-def _trim_prose(text):
-    """Keep the leading prose sentences, dropping figure/table fragments."""
+def _prose_sentences(text):
+    """Split prose into clean sentences, dropping figure/table fragments."""
     text = _ascii(text)
     text = re.sub(r"\s+", " ", text).strip()
     kept = []
@@ -351,16 +358,21 @@ def _trim_prose(text):
             kept.append(sentence)
         elif kept:
             break
-        if len(" ".join(kept)) > 300:
+        if len(" ".join(kept)) > 600:
             break
-    return " ".join(kept[:3]).strip()
+    return kept[:6]
 
 
 def extract_detail(page_text):
-    """Parse a detail page into (syntax, function, flags).
+    """Parse a detail page into (syntax_forms, sentences, flags, n_bullets).
 
-    ``flags`` is "none", a comma-separated subset of C/Z/S/O (or DFPU flags), or
-    "" when the flag table could not be parsed confidently.
+    ``syntax_forms`` is the list of syntax lines (each operand form on its own).
+    ``sentences`` is the Function description split into clean sentences.
+    ``n_bullets`` is the count of bullet markers in the Function section (the
+    Renesas manuals bullet the trailing notes; pdfminer detaches the markers but
+    the count is reliable, so the last ``n_bullets`` sentences are the notes).
+    ``flags`` is "none", a comma-separated subset of C/Z/S/O (or the DFPU flags),
+    or "" when the flag table could not be parsed confidently.
     """
     lines = [line.strip() for line in page_text.splitlines()]
     i_syn = _section_index(lines, "Syntax")
@@ -369,17 +381,19 @@ def extract_detail(page_text):
     i_flag = _section_index(lines, "Flag Change")
     i_fmt = _section_index(lines, "Instruction Format")
 
-    syntax = ""
+    syntax_forms = []
     if 0 <= i_syn < i_op:
-        syn_lines = [s for s in _clean(lines[i_syn + 1:i_op]) if _SYNLINE.match(s)]
-        syntax = _ascii(" ; ".join(syn_lines))
+        syntax_forms = [_ascii(s) for s in _clean(lines[i_syn + 1:i_op]) if _SYNLINE.match(s)]
 
-    function = ""
+    sentences, n_bullets = [], 0
     if i_fn >= 0:
         ends = [x for x in (i_flag, i_fmt, len(lines)) if x > i_fn]
-        block = " ".join(_clean(lines[i_fn + 1:min(ends)]))
+        fn_lines = lines[i_fn + 1:min(ends)]
+        n_bullets = sum(stripped.count("•") + stripped.count("·")
+                        for stripped in fn_lines)
+        block = " ".join(_clean(fn_lines))
         anchor = re.search(r"((?:\(\d+\)\s*)?(?:This instruction|These instructions|This is)\b.*)", block)
-        function = _trim_prose(anchor.group(1) if anchor else block)
+        sentences = _prose_sentences(anchor.group(1) if anchor else block)
 
     flags = ""
     if i_flag >= 0:
@@ -389,10 +403,14 @@ def extract_detail(page_text):
         else:
             names = [x for x in block if x in FLAG_NAMES]
             marks = [x for x in block if x in MARKS]
-            if names and len(marks) >= len(names):
-                changed = [names[i] for i in range(len(names)) if marks[i] == CHANGED]
+            # The grid prints all flag names (a column header row) then all
+            # marks (the row below) in the same column order, so an equal-length
+            # positional pairing is correct; a mismatch means the layout was
+            # interleaved unexpectedly, so we leave flags unknown rather than guess.
+            if names and len(marks) == len(names):
+                changed = [names[i] for i in range(len(names)) if marks[i] in CHANGED_MARKS]
                 flags = ", ".join(changed) if changed else "none"
-    return syntax, function, flags
+    return syntax_forms, sentences, flags, n_bullets
 
 
 # --- Table assembly + generation ---------------------------------------------
@@ -426,10 +444,43 @@ def esc_ts(text):
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def build_html(name, isa, syntax, function, flags):
-    parts = [f"<p>{esc_html(function if function else name + '.')}</p>"]
-    if syntax:
-        parts.append(f"<p><b>Syntax:</b> <code>{esc_html(syntax)}</code></p>")
+def _ul(items):
+    return "<ul>" + "".join(f"<li>{esc_html(i)}</li>" for i in items) + "</ul>"
+
+
+def build_function_html(name, sentences, n_bullets):
+    """Render the Function description, preserving the manual's list structure.
+
+    Numbered forms ("(1) ...", "(2) ...") become list items; otherwise the lead
+    sentence is a paragraph and the trailing ``n_bullets`` notes become a list
+    (matching how the power/llvm docenizers render <ul>/<li>).
+    """
+    if not sentences:
+        return f"<p>{esc_html(name)}.</p>"
+    numbered = [s for s in sentences if re.match(r"^\(\d+\)", s)]
+    if len(numbered) >= 2:
+        return _ul(sentences)
+    n = min(n_bullets, len(sentences) - 1)
+    lead = " ".join(sentences[:len(sentences) - n]) if n else " ".join(sentences)
+    html = f"<p>{esc_html(lead)}</p>"
+    if n:
+        html += _ul(sentences[len(sentences) - n:])
+    return html
+
+
+def build_syntax_html(forms):
+    """Render each syntax/operand form on its own line."""
+    if not forms:
+        return ""
+    lines = "<br>".join(f"<code>{esc_html(f)}</code>" for f in forms)
+    return f"<p><b>Syntax:</b><br>{lines}</p>"
+
+
+def build_html(name, isa, syntax_forms, sentences, flags, n_bullets):
+    parts = [build_function_html(name, sentences, n_bullets)]
+    syntax_html = build_syntax_html(syntax_forms)
+    if syntax_html:
+        parts.append(syntax_html)
     if flags == "none":
         parts.append("<p><b>Flags affected:</b> none</p>")
     elif flags:
@@ -443,11 +494,11 @@ def generate(index, details, out_path):
     missing = []
     for mnem in sorted(index):
         name, isa, page = index[mnem]
-        syntax, function, flags = details.get(mnem, ("", "", ""))
-        if not function:
+        syntax_forms, sentences, flags, n_bullets = details.get(mnem, ([], [], "", 0))
+        if not sentences:
             missing.append(mnem)
         url = MANUALS[isa]["url"] + (f"#page={page}" if page else "")
-        html = build_html(name, isa, syntax, function, flags)
+        html = build_html(name, isa, syntax_forms, sentences, flags, n_bullets)
         tooltip = f"{name} [{isa}]"
         cases.append(
             f'        case "{mnem}":\n'
@@ -491,7 +542,7 @@ def collect_details(index, pdf_dir):
         page_detail = {}
         for page in pages_needed:
             text = manual_pages.get(page, "")
-            page_detail[page] = extract_detail(text) if text else ("", "", "")
+            page_detail[page] = extract_detail(text) if text else ([], [], "", 0)
         for mnem, (_name, m_isa, page) in index.items():
             if m_isa == isa:
                 details[mnem] = page_detail[page]
@@ -510,8 +561,9 @@ def main():
     )
     parser.add_argument(
         "--pdf-dir",
-        help="Directory containing rxv1.pdf/rxv2.pdf/rxv3.pdf. If omitted, the "
-        "manuals are downloaded from renesas.com (which may 403).",
+        help="Offline override: directory with pre-downloaded "
+        "rxv1.pdf/rxv2.pdf/rxv3.pdf. If omitted, the manuals are downloaded "
+        "from renesas.com.",
     )
     args = parser.parse_args()
 
