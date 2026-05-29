@@ -29,13 +29,14 @@ extracts the Syntax, the Function description prose, and the Flag Change table
 deep-linking to the detail page (``...#page=N``).
 
 Usage:
-    ./docenizer-rx.py                   # download the manuals (default) and parse
-    ./docenizer-rx.py --pdf-dir DIR     # parse local rxv1.pdf/rxv2.pdf/rxv3.pdf
+    ./docenizer-rx.py           # download the manuals (default) and parse
+    ./docenizer-rx.py -i DIR    # parse local rxv1.pdf/rxv2.pdf/rxv3.pdf
 
 By default the manuals (latest revisions, see MANUALS) are downloaded from
-renesas.com, like docenizer-avr.py; ``--pdf-dir`` is an offline override pointing
-at pre-downloaded copies. When parsing yields no detail for an instruction the
-generator falls back to the index name so output is always complete.
+renesas.com, like docenizer-avr.py; ``-i/--inputfolder`` is an offline override
+pointing at pre-downloaded copies. When parsing yields no detail for an
+instruction the generator falls back to the index name so output is always
+complete.
 """
 import argparse
 import html as html_lib
@@ -253,24 +254,19 @@ CONDITIONAL_FAMILIES = {
 
 # --- PDF loading -------------------------------------------------------------
 
-def _pdf_text(path):
-    """Return the full text of a PDF (pages separated by form feeds)."""
-    return pdfminer.high_level.extract_text(path)
-
-
-def load_manual_pages(isa, pdf_dir):
+def load_manual_pages(isa, input_dir):
     """Return {printed_page_number: page_text} for one manual.
 
     The manual's printed footer ("Page N of M") matches both the index page
     numbers in the tables above and the PDF viewer's #page anchor, so we key the
-    pages on it. Reads from ``pdf_dir`` if given, otherwise downloads.
+    pages on it. Reads from ``input_dir`` if given, otherwise downloads.
     """
     manual = MANUALS[isa]
-    if pdf_dir:
-        path = os.path.join(pdf_dir, manual["pdf"])
+    if input_dir:
+        path = os.path.join(input_dir, manual["pdf"])
         if not os.path.exists(path):
             raise SystemExit(f"Missing {path} (expected {manual['pdf']} for {isa})")
-        text = _pdf_text(path)
+        text = pdfminer.high_level.extract_text(path)
     else:
         print(f"Downloading {isa} ({manual['version']}) ...", file=sys.stderr)
         req = urllib.request.Request(manual["url"], headers={"User-Agent": "Mozilla/5.0"})
@@ -279,7 +275,7 @@ def load_manual_pages(isa, pdf_dir):
         with tempfile.NamedTemporaryFile(suffix=".pdf") as f:
             f.write(data)
             f.flush()
-            text = _pdf_text(f.name)
+            text = pdfminer.high_level.extract_text(f.name)
     pages = {}
     for page in text.split("\x0c"):
         m = re.search(r"Page (\d+) of \d+", page)
@@ -332,16 +328,19 @@ def _clean(lines):
 
 
 def _section_index(lines, name):
-    for i, line in enumerate(lines):
-        if line.strip() == name:
-            return i
-    return -1
+    """Index of the line that is exactly ``name`` (a section heading), or -1."""
+    return lines.index(name) if name in lines else -1
 
 
 def _prose_sentences(text):
-    """Split prose into clean sentences, dropping figure/table fragments."""
-    text = _ascii(text)
-    text = re.sub(r"\s+", " ", text).strip()
+    """Split prose into clean sentences, dropping figure/table fragments.
+
+    Keeps a run of consecutive prose sentences: once a non-prose fragment (too
+    short/long, no terminal "."/":" or lowercase, a table token, or a flattened
+    operand table) is hit after collecting some prose, parsing stops. Capped at
+    six sentences / 600 characters.
+    """
+    text = re.sub(r"\s+", " ", _ascii(text)).strip()
     kept = []
     for sentence in re.split(r"(?<=[.:])\s+", text):
         words = sentence.split()
@@ -349,12 +348,11 @@ def _prose_sentences(text):
         # (e.g. MOV's "Register ... Memory location ... Immediate value ...")
         # rather than prose, where mid-sentence capitals are normally all-caps
         # register names (PSW, FPSW, ...) which we don't count here.
-        titlecase = sum(1 for w in words[1:] if re.match(r"^[A-Z][a-z]{2,}$", w))
-        table_run = titlecase >= 3
-        ok = (3 <= len(words) <= 60 and re.search(r"[a-z]", sentence)
-              and not _TABLE_TOK.search(sentence) and re.search(r"[.:]$", sentence)
-              and not table_run)
-        if ok:
+        table_run = sum(bool(re.match(r"^[A-Z][a-z]{2,}$", w)) for w in words[1:]) >= 3
+        is_prose = (3 <= len(words) <= 60 and re.search(r"[a-z]", sentence)
+                    and sentence.endswith((".", ":")) and not table_run
+                    and not _TABLE_TOK.search(sentence))
+        if is_prose:
             kept.append(sentence)
         elif kept:
             break
@@ -389,8 +387,7 @@ def extract_detail(page_text):
     if i_fn >= 0:
         ends = [x for x in (i_flag, i_fmt, len(lines)) if x > i_fn]
         fn_lines = lines[i_fn + 1:min(ends)]
-        n_bullets = sum(stripped.count("•") + stripped.count("·")
-                        for stripped in fn_lines)
+        n_bullets = sum(line.count("•") + line.count("·") for line in fn_lines)
         block = " ".join(_clean(fn_lines))
         anchor = re.search(r"((?:\(\d+\)\s*)?(?:This instruction|These instructions|This is)\b.*)", block)
         sentences = _prose_sentences(anchor.group(1) if anchor else block)
@@ -408,7 +405,7 @@ def extract_detail(page_text):
             # positional pairing is correct; a mismatch means the layout was
             # interleaved unexpectedly, so we leave flags unknown rather than guess.
             if names and len(marks) == len(names):
-                changed = [names[i] for i in range(len(names)) if marks[i] in CHANGED_MARKS]
+                changed = [n for n, mark in zip(names, marks) if mark in CHANGED_MARKS]
                 flags = ", ".join(changed) if changed else "none"
     return syntax_forms, sentences, flags, n_bullets
 
@@ -428,7 +425,7 @@ def build_index():
         index[mnem] = (name, "RXv2", page)
     for mnem, name, page in RXV3_NEW:
         index[mnem] = (name, "RXv3", page)
-    for _family, (mnemonics, name, isa, page) in CONDITIONAL_FAMILIES.items():
+    for mnemonics, name, isa, page in CONDITIONAL_FAMILIES.values():
         for mnem in mnemonics:
             index.setdefault(mnem, (f"{name} ({mnem})", isa, page))
     return index
@@ -460,11 +457,13 @@ def build_function_html(name, sentences, n_bullets):
     numbered = [s for s in sentences if re.match(r"^\(\d+\)", s)]
     if len(numbered) >= 2:
         return _ul(sentences)
+    # The last ``n`` sentences are the manual's bulleted notes; the rest are the
+    # lead paragraph. ``n`` is clamped to leave at least one lead sentence.
     n = min(n_bullets, len(sentences) - 1)
-    lead = " ".join(sentences[:len(sentences) - n]) if n else " ".join(sentences)
-    html = f"<p>{esc_html(lead)}</p>"
+    cut = len(sentences) - n
+    html = f"<p>{esc_html(' '.join(sentences[:cut]))}</p>"
     if n:
-        html += _ul(sentences[len(sentences) - n:])
+        html += _ul(sentences[cut:])
     return html
 
 
@@ -481,9 +480,8 @@ def build_html(name, isa, syntax_forms, sentences, flags, n_bullets):
     syntax_html = build_syntax_html(syntax_forms)
     if syntax_html:
         parts.append(syntax_html)
-    if flags == "none":
-        parts.append("<p><b>Flags affected:</b> none</p>")
-    elif flags:
+    # flags is "none", a "C, Z, ..." list, or "" (table unparsed -> omit the line).
+    if flags:
         parts.append(f"<p><b>Flags affected:</b> {esc_html(flags)}</p>")
     parts.append(f"<p><i>RX instruction (introduced in {isa}).</i></p>")
     return "".join(parts)
@@ -510,7 +508,7 @@ def generate(index, details, out_path):
         )
     versions = ", ".join(f"{k} {v['version']}" for k, v in MANUALS.items())
     header = (
-        f"// Generated from the Renesas RX instruction-set manuals\n"
+        "// Generated from the Renesas RX instruction-set manuals\n"
         f"// ({versions}) by docenizer-rx.py. Do not edit by hand.\n"
         "import type {AssemblyInstructionInfo} from "
         "'../../../types/assembly-docs.interfaces.js';\n\n"
@@ -530,7 +528,7 @@ def generate(index, details, out_path):
               f"(fell back to the index name): {', '.join(missing)}", file=sys.stderr)
 
 
-def collect_details(index, pdf_dir):
+def collect_details(index, input_dir):
     """Parse each instruction's detail page for syntax/function/flags."""
     # Group the (isa, page) lookups so each manual is loaded once.
     by_isa = {}
@@ -538,7 +536,7 @@ def collect_details(index, pdf_dir):
         by_isa.setdefault(isa, set()).add(page)
     details = {}
     for isa, pages_needed in by_isa.items():
-        manual_pages = load_manual_pages(isa, pdf_dir)
+        manual_pages = load_manual_pages(isa, input_dir)
         page_detail = {}
         for page in pages_needed:
             text = manual_pages.get(page, "")
@@ -560,7 +558,7 @@ def main():
         help="Destination .ts path (default: the in-tree generated file)",
     )
     parser.add_argument(
-        "--pdf-dir",
+        "-i", "--inputfolder",
         help="Offline override: directory with pre-downloaded "
         "rxv1.pdf/rxv2.pdf/rxv3.pdf. If omitted, the manuals are downloaded "
         "from renesas.com.",
@@ -568,7 +566,7 @@ def main():
     args = parser.parse_args()
 
     index = build_index()
-    details = collect_details(index, args.pdf_dir)
+    details = collect_details(index, args.inputfolder)
     generate(index, details, args.outputpath)
 
 
