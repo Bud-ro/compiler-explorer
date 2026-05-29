@@ -124,10 +124,16 @@ const TEST_MATRIX: Record<PropertyKey, [string, string, string, string][]> = {
         ],
     ],
     rx: [
-        ['mov', 'Transferring data [RXv1]', 'Transferring data', 'renesas.com'],
-        ['fadd', 'Floating-point addition [RXv1]', 'Floating-point addition', 'renesas.com'],
-        ['emaca', 'Extended multiply-accumulate', 'RXv2', 'rxv2'],
-        ['dadd', 'Double-precision floating-point addition without carry [RXv3]', 'RXv3', 'rxv3'],
+        ['mov', 'Transferring data [RXv1]', 'This instruction transfers src to dest', 'renesas.com'],
+        ['fadd', 'Floating-point addition [RXv1]', 'single-precision floating-point', 'renesas.com'],
+        ['add', 'Addition without carry [RXv1]', 'Flags affected:', 'rev120#page=53'],
+        ['emaca', 'Extended multiply-accumulate', 'multiplies src by src2', 'rxv2'],
+        [
+            'dadd',
+            'Double-precision floating-point addition without carry [RXv3]',
+            'double-precision floating-point',
+            'rxv3',
+        ],
     ],
 };
 

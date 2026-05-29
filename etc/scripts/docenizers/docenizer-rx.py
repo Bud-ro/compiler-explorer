@@ -15,34 +15,38 @@ instruction-set-architecture revisions, each with its own Renesas manual:
 Each is upward compatible with the previous, so the generated table is the
 union: every mnemonic maps to the newest manual that documents it (so the
 deep-link lands on a page that actually exists), and a note records which ISA
-revision introduced it. Each manual's "Quick Page Reference in Alphabetical
-Order" gives, per instruction, the mnemonic, a one-line Function description,
-and the detail page; this script parses those lists and emits
-``lib/asm-docs/generated/asm-docs-rx.ts`` with a ``getAsmOpcode`` switch whose
-tooltip is the manual's Function text and whose URL deep-links to the detail
-page (``...#page=N``), mirroring the AVR output.
+revision introduced it.
+
+The curated tables below are the authoritative *index*: per instruction they
+give the mnemonic, the manual's one-line name, and the detail page (from each
+manual's "Quick Page Reference in Alphabetical Order"). For the actual tooltip
+body this docenizer then parses that instruction's *detail page* in the PDF and
+extracts the Syntax, the Function description prose, and the Flag Change table
+(which of C/Z/S/O are affected) -- mirroring how docenizer-avr.py pulls the
+"Description" section. It emits ``lib/asm-docs/generated/asm-docs-rx.ts`` with a
+``getAsmOpcode`` switch whose ``tooltip`` is the short instruction name and whose
+``html`` is the description + syntax + affected flags, with the ``url``
+deep-linking to the detail page (``...#page=N``).
 
 Usage:
-    ./docenizer-rx.py                       # (re)generate the .ts from the tables
-    ./docenizer-rx.py --verify              # re-parse the PDFs, report any diffs
-    ./docenizer-rx.py --verify --from-text v1.txt v2.txt v3.txt
+    ./docenizer-rx.py --pdf-dir DIR     # parse rxv1.pdf/rxv2.pdf/rxv3.pdf in DIR
+    ./docenizer-rx.py                   # download the manuals, then parse
 
-The instruction tables below are transcribed from the three manuals' "Quick
-Page Reference in Alphabetical Order" lists -- mnemonic, the manual's exact
-one-line Function text, and the detail page. ``--verify`` downloads (or reads)
-the manual PDFs, parses those same lists with pdftotext/pdfplumber, and reports
-any mnemonic/page that differs from the embedded table, so the transcription can
-be confirmed or refreshed against a new revision. Renesas' site frequently 403s
-automated fetches, which is why generation reads from the embedded tables and
-verification is a separate, opt-in step.
+The PDFs are the latest revisions published at
+https://llvm-gcc-renesas.com / https://www.renesas.com (see MANUALS). Renesas'
+site sometimes 403s automated fetches, so ``--pdf-dir`` lets you point at
+locally downloaded copies; when parsing yields no detail for an instruction the
+generator falls back to the index name so output is always complete.
 """
 import argparse
-import io
+import html as html_lib
+import os
 import re
-import subprocess
 import sys
 import tempfile
 import urllib.request
+
+import pdfminer.high_level
 
 # --- Manual coordinates ------------------------------------------------------
 
@@ -50,14 +54,17 @@ MANUALS = {
     "RXv1": {
         "version": "R01US0032EJ0120 Rev.1.20",
         "url": "https://www.renesas.com/en/document/mas/rx-family-users-manual-software-rev120",
+        "pdf": "rxv1.pdf",
     },
     "RXv2": {
         "version": "R01US0071EJ0100 Rev.1.00",
         "url": "https://www.renesas.com/en/document/mas/rx-family-rxv2-instruction-set-architecture-users-manual-software",
+        "pdf": "rxv2.pdf",
     },
     "RXv3": {
         "version": "R01US0316EJ0100 Rev.1.00",
         "url": "https://www.renesas.com/en/document/mas/rx-family-rxv3-instruction-set-architecture-users-manual-software-rev100",
+        "pdf": "rxv3.pdf",
     },
 }
 
@@ -245,109 +252,209 @@ CONDITIONAL_FAMILIES = {
 }
 
 
-# --- PDF fetch / parse -------------------------------------------------------
+# --- PDF loading -------------------------------------------------------------
 
-def fetch_manual_text(url):
-    """Download a manual PDF and extract its text. Returns None on failure."""
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+def _pdf_text(path):
+    """Return the full text of a PDF (pages separated by form feeds)."""
+    return pdfminer.high_level.extract_text(path)
+
+
+def load_manual_pages(isa, pdf_dir):
+    """Return {printed_page_number: page_text} for one manual.
+
+    The manual's printed footer ("Page N of M") matches both the index page
+    numbers in the tables above and the PDF viewer's #page anchor, so we key the
+    pages on it. Reads from ``pdf_dir`` if given, otherwise downloads.
+    """
+    manual = MANUALS[isa]
+    if pdf_dir:
+        path = os.path.join(pdf_dir, manual["pdf"])
+        if not os.path.exists(path):
+            raise SystemExit(f"Missing {path} (expected {manual['pdf']} for {isa})")
+        text = _pdf_text(path)
+    else:
+        print(f"Downloading {isa} ({manual['version']}) ...", file=sys.stderr)
+        req = urllib.request.Request(manual["url"], headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
             data = resp.read()
-    except Exception as e:  # pragma: no cover - network dependent
-        print(f"  (could not download {url}: {e})", file=sys.stderr)
-        return None
-    try:
         with tempfile.NamedTemporaryFile(suffix=".pdf") as f:
             f.write(data)
             f.flush()
-            out = subprocess.run(
-                ["pdftotext", "-layout", f.name, "-"],
-                capture_output=True, check=True,
-            )
-            return out.stdout.decode("utf-8", "replace")
-    except Exception:
-        pass
-    try:  # pragma: no cover - optional dependency
-        import pdfplumber
-        text = []
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            for page in pdf.pages:
-                text.append(page.extract_text() or "")
-        return "\n".join(text)
-    except Exception as e:  # pragma: no cover
-        print(f"  (no PDF text extractor available: {e})", file=sys.stderr)
-        return None
+            text = _pdf_text(f.name)
+    pages = {}
+    for page in text.split("\x0c"):
+        m = re.search(r"Page (\d+) of \d+", page)
+        if m:
+            pages.setdefault(int(m.group(1)), page)
+    return pages
 
 
-# Row: MNEMONIC  Function text  detail-page  code-page
-_ROW = re.compile(r"^([A-Z][A-Z0-9]+)\s+(.+?)\s+(\d{1,3})\s+(\d{1,3})\s*$")
+# --- Detail-page parsing -----------------------------------------------------
+
+FLAG_NAMES = {"C", "Z", "S", "O",
+              "DCV", "DCO", "DCZ", "DCU", "DCX", "DCE",
+              "DFV", "DFO", "DFZ", "DFU", "DFX"}
+MARKS = {"√", "−", "-", "–"}  # check, minus, hyphen, en-dash
+CHANGED = "√"
+# Page furniture that pdfminer interleaves into the section text.
+_NOISE = re.compile(
+    r"^(Section\s+\d+|Instruction Code|Page:\s*\d+|RX Family|R01US\d|.*Rev\.\d+$|"
+    r"Page \d+ of \d+|[A-Za-z/\- ]*\binstruction$)"
+)
+# A real Syntax line starts with the (optionally numbered) mnemonic token.
+_SYNLINE = re.compile(r"^(\(\d+\)\s*)?[A-Z][A-Z0-9_]{1,9}(\.[A-Za-z]+)?[ (\t]")
+# Tokens that mark the start of an operand/encoding table (not prose).
+_TABLE_TOK = re.compile(r"\b(b\d{1,2}|Operand|Processing|Code Size|memex|UIMM|SIMM|dsp:|Rs2?|Rd|Adest)\b")
 
 
-def parse_manual_text(text):
-    """Extract (mnemonic, function, detail_page) rows from manual text."""
-    rows, seen, in_list = [], set(), False
-    for line in text.splitlines():
-        if ("Alphabetical Order" in line) or ("Classified in Alphabetical" in line):
-            in_list = True
-            continue
-        if in_list and "Classified by Type" in line:
+def _ascii(text):
+    """Normalize a few unicode symbols and drop any remaining non-ASCII."""
+    text = (text.replace("–", "-").replace("—", "-").replace("−", "-")
+                .replace("×", "x").replace("√", "").replace("•", " ")
+                .replace("·", " "))
+    return text.encode("ascii", "ignore").decode("ascii")
+
+
+def _clean(lines):
+    out = []
+    for line in lines:
+        s = re.sub(r"\s{2,}", " ", line.strip())
+        if s and not _NOISE.match(s):
+            out.append(s)
+    return out
+
+
+def _section_index(lines, name):
+    for i, line in enumerate(lines):
+        if line.strip() == name:
+            return i
+    return -1
+
+
+def _trim_prose(text):
+    """Keep the leading prose sentences, dropping figure/table fragments."""
+    text = _ascii(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    kept = []
+    for sentence in re.split(r"(?<=[.:])\s+", text):
+        words = sentence.split()
+        # Several Title-Case words mid-sentence signal a flattened operand table
+        # (e.g. MOV's "Register ... Memory location ... Immediate value ...")
+        # rather than prose, where mid-sentence capitals are normally all-caps
+        # register names (PSW, FPSW, ...) which we don't count here.
+        titlecase = sum(1 for w in words[1:] if re.match(r"^[A-Z][a-z]{2,}$", w))
+        table_run = titlecase >= 3
+        ok = (3 <= len(words) <= 60 and re.search(r"[a-z]", sentence)
+              and not _TABLE_TOK.search(sentence) and re.search(r"[.:]$", sentence)
+              and not table_run)
+        if ok:
+            kept.append(sentence)
+        elif kept:
             break
-        if not in_list:
-            continue
-        m = _ROW.match(line.strip())
-        if not m:
-            continue
-        mnem, func, detail = m.group(1), m.group(2).strip(), int(m.group(3))
-        if mnem in {"RX", "Mnemonic"} or detail < 40 or detail > 260:
-            continue
-        if mnem in seen:
-            continue
-        seen.add(mnem)
-        rows.append((mnem, func, detail))
-    return rows
+        if len(" ".join(kept)) > 300:
+            break
+    return " ".join(kept[:3]).strip()
 
 
-def build_table():
-    """Union of the three ISA revisions: mnemonic -> (func, isa, page|None).
+def extract_detail(page_text):
+    """Parse a detail page into (syntax, function, flags).
+
+    ``flags`` is "none", a comma-separated subset of C/Z/S/O (or DFPU flags), or
+    "" when the flag table could not be parsed confidently.
+    """
+    lines = [line.strip() for line in page_text.splitlines()]
+    i_syn = _section_index(lines, "Syntax")
+    i_op = _section_index(lines, "Operation")
+    i_fn = _section_index(lines, "Function")
+    i_flag = _section_index(lines, "Flag Change")
+    i_fmt = _section_index(lines, "Instruction Format")
+
+    syntax = ""
+    if 0 <= i_syn < i_op:
+        syn_lines = [s for s in _clean(lines[i_syn + 1:i_op]) if _SYNLINE.match(s)]
+        syntax = _ascii(" ; ".join(syn_lines))
+
+    function = ""
+    if i_fn >= 0:
+        ends = [x for x in (i_flag, i_fmt, len(lines)) if x > i_fn]
+        block = " ".join(_clean(lines[i_fn + 1:min(ends)]))
+        anchor = re.search(r"((?:\(\d+\)\s*)?(?:This instruction|These instructions|This is)\b.*)", block)
+        function = _trim_prose(anchor.group(1) if anchor else block)
+
+    flags = ""
+    if i_flag >= 0:
+        block = lines[i_flag + 1:(i_fmt if i_fmt > i_flag else len(lines))]
+        if "does not affect" in " ".join(block):
+            flags = "none"
+        else:
+            names = [x for x in block if x in FLAG_NAMES]
+            marks = [x for x in block if x in MARKS]
+            if names and len(marks) >= len(names):
+                changed = [names[i] for i in range(len(names)) if marks[i] == CHANGED]
+                flags = ", ".join(changed) if changed else "none"
+    return syntax, function, flags
+
+
+# --- Table assembly + generation ---------------------------------------------
+
+def build_index():
+    """Union of the three ISA revisions: mnemonic -> (name, isa, page).
 
     Newer manuals win for shared mnemonics so the deep-link page exists in the
     referenced manual; the ISA tag still reflects where it was introduced.
     """
-    table = {}
-    # RXv1 base.
-    for mnem, func, page in RXV1:
-        table[mnem] = (func, "RXv1", page)
-    # RXv2 additions (and any RXv2 re-pagination of new wording).
-    for mnem, func, page in RXV2_NEW:
-        table[mnem] = (func, "RXv2", page)
-    # RXv3 additions (double-precision family etc.).
-    for mnem, func, page in RXV3_NEW:
-        table[mnem] = (func, "RXv3", page)
-    # Conditional families.
-    for _f, (mnemonics, func, isa, page) in CONDITIONAL_FAMILIES.items():
+    index = {}
+    for mnem, name, page in RXV1:
+        index[mnem] = (name, "RXv1", page)
+    for mnem, name, page in RXV2_NEW:
+        index[mnem] = (name, "RXv2", page)
+    for mnem, name, page in RXV3_NEW:
+        index[mnem] = (name, "RXv3", page)
+    for _family, (mnemonics, name, isa, page) in CONDITIONAL_FAMILIES.items():
         for mnem in mnemonics:
-            table.setdefault(mnem, (f"{func} ({mnem})", isa, page))
-    return table
+            index.setdefault(mnem, (f"{name} ({mnem})", isa, page))
+    return index
 
 
-def escape(text):
+def esc_html(text):
+    """HTML-escape content (the generated value is embedded as HTML)."""
+    return html_lib.escape(text, quote=False)
+
+
+def esc_ts(text):
+    """Escape for a double-quoted TypeScript string literal."""
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def generate(table, out_path):
+def build_html(name, isa, syntax, function, flags):
+    parts = [f"<p>{esc_html(function if function else name + '.')}</p>"]
+    if syntax:
+        parts.append(f"<p><b>Syntax:</b> <code>{esc_html(syntax)}</code></p>")
+    if flags == "none":
+        parts.append("<p><b>Flags affected:</b> none</p>")
+    elif flags:
+        parts.append(f"<p><b>Flags affected:</b> {esc_html(flags)}</p>")
+    parts.append(f"<p><i>RX instruction (introduced in {isa}).</i></p>")
+    return "".join(parts)
+
+
+def generate(index, details, out_path):
     cases = []
-    for mnem in sorted(table):
-        func, isa, page = table[mnem]
-        manual = MANUALS[isa]
-        url = manual["url"] + (f"#page={page}" if page else "")
-        html = escape(f"<p>{func}. (RX instruction, introduced in {isa}.)</p>")
-        tooltip = escape(f"{func} [{isa}]")
+    missing = []
+    for mnem in sorted(index):
+        name, isa, page = index[mnem]
+        syntax, function, flags = details.get(mnem, ("", "", ""))
+        if not function:
+            missing.append(mnem)
+        url = MANUALS[isa]["url"] + (f"#page={page}" if page else "")
+        html = build_html(name, isa, syntax, function, flags)
+        tooltip = f"{name} [{isa}]"
         cases.append(
             f'        case "{mnem}":\n'
             f"            return {{\n"
-            f'                "html": "{html}",\n'
-            f'                "tooltip": "{tooltip}",\n'
-            f'                "url": "{escape(url)}",\n'
+            f'                "html": "{esc_ts(html)}",\n'
+            f'                "tooltip": "{esc_ts(tooltip)}",\n'
+            f'                "url": "{esc_ts(url)}",\n'
             f"            }};\n"
         )
     versions = ", ".join(f"{k} {v['version']}" for k, v in MANUALS.items())
@@ -367,80 +474,50 @@ def generate(table, out_path):
         f.write("\n".join(cases))
         f.write(footer)
     print(f"Wrote {len(cases)} RX opcodes (RXv1+RXv2+RXv3) to {out_path}")
+    if missing:
+        print(f"  note: {len(missing)} opcodes have no parsed Function "
+              f"(fell back to the index name): {', '.join(missing)}", file=sys.stderr)
 
 
-def verify_against_manual(isa, text):
-    """Compare the embedded table for one ISA against parsed manual text.
-
-    Reports mnemonics/pages that differ so a maintainer can confirm (or update)
-    the embedded snapshot against the real PDF. Returns the number of mismatches.
-    """
-    parsed = {mnem: (func, page) for mnem, func, page in parse_manual_text(text)}
-    if not parsed:
-        print(f"  {isa}: could not parse an instruction list from the manual text")
-        return 0
-    embedded = {"RXv1": RXV1, "RXv2": RXV2_NEW, "RXv3": RXV3_NEW}[isa]
-    mismatches = 0
-    for mnem, _func, page in embedded:
-        if mnem not in parsed:
-            # RXv2_NEW/RXV3_NEW only list deltas, so absence is expected there.
-            if isa == "RXv1":
-                print(f"  {isa}: {mnem} in snapshot but not parsed from manual")
-                mismatches += 1
-            continue
-        man_page = parsed[mnem][1]
-        if page is not None and man_page != page:
-            print(f"  {isa}: {mnem} page {page} (snapshot) != {man_page} (manual)")
-            mismatches += 1
-    print(f"  {isa}: {len(parsed)} parsed, {mismatches} mismatch(es) vs snapshot")
-    return mismatches
-
-
-def load_texts(from_text):
-    """Yield (isa, text) for each manual, from local dumps or live download."""
-    if from_text:
-        for isa, path in zip(("RXv1", "RXv2", "RXv3"), from_text):
-            try:
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    yield isa, f.read()
-            except OSError as e:
-                print(f"  ({path}: {e})", file=sys.stderr)
-    else:
-        for isa, m in MANUALS.items():
-            print(f"Fetching {isa} ({m['version']}) ...")
-            t = fetch_manual_text(m["url"])
-            if t:
-                yield isa, t
+def collect_details(index, pdf_dir):
+    """Parse each instruction's detail page for syntax/function/flags."""
+    # Group the (isa, page) lookups so each manual is loaded once.
+    by_isa = {}
+    for mnem, (_name, isa, page) in index.items():
+        by_isa.setdefault(isa, set()).add(page)
+    details = {}
+    for isa, pages_needed in by_isa.items():
+        manual_pages = load_manual_pages(isa, pdf_dir)
+        page_detail = {}
+        for page in pages_needed:
+            text = manual_pages.get(page, "")
+            page_detail[page] = extract_detail(text) if text else ("", "", "")
+        for mnem, (_name, m_isa, page) in index.items():
+            if m_isa == isa:
+                details[mnem] = page_detail[page]
+    return details
 
 
 def main():
-    p = argparse.ArgumentParser(
-        description="Docenizes the Renesas RX instruction set (RXv1/RXv2/RXv3). "
-        "The instruction tables are transcribed from the Renesas manuals; use "
-        "--verify to re-parse the PDFs and check the transcription."
+    parser = argparse.ArgumentParser(
+        description="Docenize the Renesas RX instruction set (RXv1/RXv2/RXv3) by "
+        "parsing the Syntax/Function/Flag-Change detail pages of the three manuals."
     )
-    p.add_argument(
+    parser.add_argument(
         "-o", "--outputpath",
         default="../../../lib/asm-docs/generated/asm-docs-rx.ts",
         help="Destination .ts path (default: the in-tree generated file)",
     )
-    p.add_argument(
-        "--verify", action="store_true",
-        help="Re-parse the manual PDFs and report any differences from the "
-        "embedded tables instead of generating output",
+    parser.add_argument(
+        "--pdf-dir",
+        help="Directory containing rxv1.pdf/rxv2.pdf/rxv3.pdf. If omitted, the "
+        "manuals are downloaded from renesas.com (which may 403).",
     )
-    p.add_argument(
-        "--from-text", nargs=3, metavar=("RXV1_TXT", "RXV2_TXT", "RXV3_TXT"),
-        help="Use pre-fetched text dumps of the three manuals (for --verify)",
-    )
-    args = p.parse_args()
+    args = parser.parse_args()
 
-    if args.verify:
-        total = sum(verify_against_manual(isa, text) for isa, text in load_texts(args.from_text))
-        print(f"Total mismatches: {total}")
-        sys.exit(1 if total else 0)
-
-    generate(build_table(), args.outputpath)
+    index = build_index()
+    details = collect_details(index, args.pdf_dir)
+    generate(index, details, args.outputpath)
 
 
 if __name__ == "__main__":
